@@ -5,6 +5,7 @@
   "description": "Greenfield Academy school portal — role-based admin, teacher and student management with sections, photos and PDF printing",
   "main": "server/index.js",
   "scripts": {
+    "build": "node -e \"console.log('Static client assets are ready in public/')\"",
     "start": "node server/index.js",
     "dev": "node --watch server/index.js",
     "seed": "node server/seed.js"
