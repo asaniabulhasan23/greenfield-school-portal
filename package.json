@@ -1,8 +1,8 @@
 {
-  "name": "school-portal",
-  "version": "1.0.0",
+  "name": "greenfield-school-portal",
+  "version": "1.1.0",
   "private": true,
-  "description": "Greenfield Academy — full-stack school management portal (Node + SQLite, zero dependencies)",
+  "description": "Greenfield Academy school portal — role-based admin, teacher and student management with sections, photos and PDF printing",
   "main": "server/index.js",
   "scripts": {
     "start": "node server/index.js",
@@ -10,6 +10,9 @@
     "seed": "node server/seed.js"
   },
   "engines": {
-    "node": ">=22.5"
+    "node": ">=22.13.0"
+  },
+  "dependencies": {
+    "@vercel/blob": "^2.9.0"
   }
 }

@@ -1,7 +1,7 @@
 'use strict';
 
 const {
-  db, hashPassword, isSeeded, TERM, DAYS, PERIODS,
+  getDb, hashPassword, isSeeded, TERM, DAYS, PERIODS,
 } = require('./db');
 
 /* Deterministic pseudo-random so the demo data is stable */
@@ -89,43 +89,43 @@ function seed() {
   if (isSeeded()) return false;
 
   const today = isoToday();
-  const insertUser = db.prepare(
+  const insertUser = getDb().prepare(
     'INSERT INTO users (name, email, password_hash, role, phone, color) VALUES (?, ?, ?, ?, ?, ?)'
   );
-  const insertTeacher = db.prepare(
+  const insertTeacher = getDb().prepare(
     'INSERT INTO teachers (user_id, staff_no, specialty, qualification, hired_at) VALUES (?, ?, ?, ?, ?)'
   );
-  const insertClass = db.prepare(
+  const insertClass = getDb().prepare(
     'INSERT INTO classes (name, level, section_id, form_teacher_id, room, capacity) VALUES (?, ?, ?, ?, ?, ?)'
   );
-  const insertSection = db.prepare(
+  const insertSection = getDb().prepare(
     'INSERT INTO sections (name, code, level, head_teacher_id, description) VALUES (?, ?, ?, ?, ?)'
   );
-  const insertStudent = db.prepare(
+  const insertStudent = getDb().prepare(
     `INSERT INTO students (user_id, admission_no, class_id, gender, dob, guardian_name, guardian_phone, address)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
   );
-  const insertSubject = db.prepare(
+  const insertSubject = getDb().prepare(
     'INSERT INTO subjects (name, code, teacher_id, class_id, periods) VALUES (?, ?, ?, ?, ?)'
   );
-  const insertSlot = db.prepare(
+  const insertSlot = getDb().prepare(
     'INSERT INTO timetable (class_id, subject_id, day, start_time, end_time, room) VALUES (?, ?, ?, ?, ?, ?)'
   );
-  const insertAttendance = db.prepare(
+  const insertAttendance = getDb().prepare(
     'INSERT INTO attendance (student_id, class_id, date, status, recorded_by) VALUES (?, ?, ?, ?, ?)'
   );
-  const insertGrade = db.prepare(
+  const insertGrade = getDb().prepare(
     `INSERT INTO grades (student_id, subject_id, term, assessment, score, max_score, recorded_by)
      VALUES (?, ?, ?, ?, ?, ?, ?)`
   );
-  const insertFee = db.prepare(
+  const insertFee = getDb().prepare(
     'INSERT INTO fees (student_id, term, description, amount, paid, due_date) VALUES (?, ?, ?, ?, ?, ?)'
   );
-  const insertAnnouncement = db.prepare(
+  const insertAnnouncement = getDb().prepare(
     'INSERT INTO announcements (title, body, audience, author_id, pinned, created_at) VALUES (?, ?, ?, ?, ?, ?)'
   );
 
-  db.exec('BEGIN');
+  getDb().exec('BEGIN');
   try {
     /* ---- admin ---- */
     const adminId = Number(insertUser.run(
@@ -236,7 +236,7 @@ function seed() {
     const assessments = [
       ['Quiz 1', 20], ['Assignment', 20], ['Mid-term Test', 30], ['Examination', 30],
     ];
-    const subjectsByClass = db.prepare('SELECT id, class_id FROM subjects').all();
+    const subjectsByClass = getDb().prepare('SELECT id, class_id FROM subjects').all();
     studentRows.forEach((s) => {
       const subjects = subjectsByClass.filter((x) => x.class_id === s.classId);
       subjects.forEach((sub) => {
@@ -273,9 +273,9 @@ function seed() {
       );
     });
 
-    db.exec('COMMIT');
+    getDb().exec('COMMIT');
   } catch (err) {
-    db.exec('ROLLBACK');
+    getDb().exec('ROLLBACK');
     throw err;
   }
   return true;
@@ -291,17 +291,17 @@ if (require.main === module) {
 /* Older databases were seeded before sections existed. Create the two demo
    sections and attach existing classes to them. */
 function ensureSections() {
-  const count = db.prepare('SELECT COUNT(*) n FROM sections').get().n;
+  const count = getDb().prepare('SELECT COUNT(*) n FROM sections').get().n;
   if (count) {
-    db.prepare(`UPDATE classes SET section_id = (SELECT id FROM sections WHERE code = 'JSS')
+    getDb().prepare(`UPDATE classes SET section_id = (SELECT id FROM sections WHERE code = 'JSS')
       WHERE section_id IS NULL AND name LIKE 'JSS%'`).run();
-    db.prepare(`UPDATE classes SET section_id = (SELECT id FROM sections WHERE code = 'SSS')
+    getDb().prepare(`UPDATE classes SET section_id = (SELECT id FROM sections WHERE code = 'SSS')
       WHERE section_id IS NULL AND name LIKE 'SSS%'`).run();
     return false;
   }
-  const findTeacher = db.prepare(`
+  const findTeacher = getDb().prepare(`
     SELECT t.id FROM teachers t JOIN users u ON u.id = t.user_id WHERE u.name = ?`);
-  const insert = db.prepare(`
+  const insert = getDb().prepare(`
     INSERT INTO sections (name, code, level, head_teacher_id, description)
     VALUES (?, ?, ?, ?, ?)`);
   const junior = Number(insert.run(
@@ -312,8 +312,8 @@ function ensureSections() {
     'Senior Secondary', 'SSS', 'Senior', findTeacher.get('Adaeze Okafor')?.id || null,
     'SSS 1–3 · WAEC and NECO preparation'
   ).lastInsertRowid);
-  db.prepare("UPDATE classes SET section_id = ? WHERE name LIKE 'JSS%'").run(junior);
-  db.prepare("UPDATE classes SET section_id = ? WHERE name LIKE 'SSS%'").run(senior);
+  getDb().prepare("UPDATE classes SET section_id = ? WHERE name LIKE 'JSS%'").run(junior);
+  getDb().prepare("UPDATE classes SET section_id = ? WHERE name LIKE 'SSS%'").run(senior);
   return true;
 }
 

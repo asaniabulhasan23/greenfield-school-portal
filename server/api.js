@@ -4,11 +4,10 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const EXPORTS_DIR = path.join(__dirname, '..', 'data', 'exports');
-fs.mkdirSync(EXPORTS_DIR, { recursive: true });
 const {
-  db, verifyPassword, hashPassword, TERM, SCHOOL, DAYS,
-  letterGrade, todayISO, UPLOADS_DIR,
+  getDb, syncDb, saveUpload, deleteUpload, saveExport,
+  verifyPassword, hashPassword, TERM, SCHOOL, DAYS,
+  letterGrade, todayISO, UPLOADS_DIR, EXPORTS_DIR,
 } = require('./db');
 
 const ASSESSMENTS = [
@@ -89,36 +88,44 @@ function round1(n) {
 /*  Queries                                                            */
 /* ------------------------------------------------------------------ */
 
-const q = {
-  userById: db.prepare(`
-    SELECT u.id, u.name, u.email, u.role, u.phone, u.color, u.photo,
-           t.id AS teacher_id, s.id AS student_id, s.class_id,
-           c.name AS class_name, c.section_id, sec.name AS section_name
-    FROM users u
-    LEFT JOIN teachers t ON t.user_id = u.id
-    LEFT JOIN students s ON s.user_id = u.id
-    LEFT JOIN classes c ON c.id = s.class_id
-    LEFT JOIN sections sec ON sec.id = c.section_id
-    WHERE u.id = ?`),
-  userByEmail: db.prepare('SELECT * FROM users WHERE lower(email) = lower(?)'),
-  session: db.prepare(`
-    SELECT u.id FROM sessions se JOIN users u ON u.id = se.user_id
-    WHERE se.token = ? AND se.expires_at > datetime('now')`),
-  insertSession: db.prepare('INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, datetime(\'now\', ?))'),
-  deleteSession: db.prepare('DELETE FROM sessions WHERE token = ?'),
-  expiredSessions: db.prepare('DELETE FROM sessions WHERE expires_at <= datetime(\'now\')'),
-};
+let queryCache = null;
+function queries() {
+  if (!queryCache) {
+    const database = getDb();
+    queryCache = {
+      userById: database.prepare(`
+        SELECT u.id, u.name, u.email, u.role, u.phone, u.color, u.photo,
+               t.id AS teacher_id, s.id AS student_id, s.class_id,
+               c.name AS class_name, c.section_id, sec.name AS section_name
+        FROM users u
+        LEFT JOIN teachers t ON t.user_id = u.id
+        LEFT JOIN students s ON s.user_id = u.id
+        LEFT JOIN classes c ON c.id = s.class_id
+        LEFT JOIN sections sec ON sec.id = c.section_id
+        WHERE u.id = ?`),
+      userByEmail: database.prepare('SELECT * FROM users WHERE lower(email) = lower(?)'),
+      session: database.prepare(`
+        SELECT u.id FROM sessions se JOIN users u ON u.id = se.user_id
+        WHERE se.token = ? AND se.expires_at > datetime('now')`),
+      insertSession: database.prepare('INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, datetime(\'now\', ?))'),
+      deleteSession: database.prepare('DELETE FROM sessions WHERE token = ?'),
+      expiredSessions: database.prepare('DELETE FROM sessions WHERE expires_at <= datetime(\'now\')'),
+    };
+  }
+  return queryCache;
+}
+const q = new Proxy({}, { get: (_, key) => queries()[key] });
 
 function studentSummary(studentId) {
-  const att = db.prepare(`
+  const att = getDb().prepare(`
     SELECT COUNT(*) AS total,
            SUM(CASE WHEN status IN ('present','late') THEN 1 ELSE 0 END) AS attended,
            SUM(CASE WHEN status = 'absent' THEN 1 ELSE 0 END) AS absent
     FROM attendance WHERE student_id = ?`).get(studentId) || {};
-  const grades = db.prepare(`
+  const grades = getDb().prepare(`
     SELECT SUM(score) AS score, SUM(max_score) AS max, COUNT(*) AS n
     FROM grades WHERE student_id = ?`).get(studentId) || {};
-  const fees = db.prepare(`
+  const fees = getDb().prepare(`
     SELECT SUM(amount) AS billed, SUM(paid) AS paid, SUM(amount - paid) AS balance
     FROM fees WHERE student_id = ?`).get(studentId) || {};
   const pct = grades.max ? (grades.score * 100) / grades.max : null;
@@ -136,7 +143,7 @@ function studentSummary(studentId) {
 }
 
 function classStats(classId) {
-  const cls = db.prepare(`
+  const cls = getDb().prepare(`
     SELECT c.*, u.name AS form_teacher, u.photo AS form_teacher_photo,
            sec.name AS section_name, sec.code AS section_code
     FROM classes c LEFT JOIN teachers t ON t.id = c.form_teacher_id
@@ -144,17 +151,17 @@ function classStats(classId) {
     LEFT JOIN sections sec ON sec.id = c.section_id
     WHERE c.id = ?`).get(classId);
   if (!cls) return null;
-  const students = db.prepare(`
+  const students = getDb().prepare(`
     SELECT s.id, u.name FROM students s JOIN users u ON u.id = s.user_id
     WHERE s.class_id = ? ORDER BY u.name`).all(classId);
-  const att = db.prepare(`
+  const att = getDb().prepare(`
     SELECT COUNT(*) AS total,
            SUM(CASE WHEN status IN ('present','late') THEN 1 ELSE 0 END) AS attended
     FROM attendance WHERE class_id = ?`).get(classId) || {};
-  const perf = db.prepare(`
+  const perf = getDb().prepare(`
     SELECT AVG(g.score * 100.0 / g.max_score) AS pct
     FROM grades g JOIN students s ON s.id = g.student_id WHERE s.class_id = ?`).get(classId) || {};
-  const fees = db.prepare(`
+  const fees = getDb().prepare(`
     SELECT SUM(f.amount) AS billed, SUM(f.paid) AS paid
     FROM fees f JOIN students s ON s.id = f.student_id WHERE s.class_id = ?`).get(classId) || {};
   return {
@@ -173,7 +180,7 @@ function announcementsFor(role, limit = 50) {
     ? ['all', 'students', 'teachers']
     : role === 'teacher' ? ['all', 'teachers'] : ['all', 'students'];
   const marks = audiences.map(() => '?').join(',');
-  return db.prepare(`
+  return getDb().prepare(`
     SELECT a.*, u.name AS author
     FROM announcements a LEFT JOIN users u ON u.id = a.author_id
     WHERE a.audience IN (${marks})
@@ -188,12 +195,12 @@ function feeStatus(fee) {
 
 function attendanceTrend(limit = 10, classId = null) {
   const rows = classId
-    ? db.prepare(`
+    ? getDb().prepare(`
         SELECT date, COUNT(*) AS total,
                SUM(CASE WHEN status IN ('present','late') THEN 1 ELSE 0 END) AS attended
         FROM attendance WHERE class_id = ?
         GROUP BY date ORDER BY date DESC LIMIT ?`).all(classId, limit)
-    : db.prepare(`
+    : getDb().prepare(`
         SELECT date, COUNT(*) AS total,
                SUM(CASE WHEN status IN ('present','late') THEN 1 ELSE 0 END) AS attended
         FROM attendance GROUP BY date ORDER BY date DESC LIMIT ?`).all(limit);
@@ -251,15 +258,15 @@ add('POST', '/api/auth/password', ({ user, body }) => {
   const current = str(body.current, 200);
   const next = str(body.next, 200);
   if (next.length < 6) bad('New password must be at least 6 characters.');
-  const row = db.prepare('SELECT password_hash FROM users WHERE id = ?').get(user.id);
+  const row = getDb().prepare('SELECT password_hash FROM users WHERE id = ?').get(user.id);
   if (!verifyPassword(current, row.password_hash)) bad('Current password is incorrect.', 403);
-  db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hashPassword(next), user.id);
+  getDb().prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hashPassword(next), user.id);
   return { ok: true };
 });
 
 /* ---- printable document exports ---- */
 
-add('POST', '/api/export', ({ user, body }) => {
+add('POST', '/api/export', async ({ user, body }) => {
   const base64 = String(body.data || '');
   if (!/^[A-Za-z0-9+/=]+$/.test(base64)) bad('That document could not be read.');
   const buffer = Buffer.from(base64, 'base64');
@@ -267,9 +274,9 @@ add('POST', '/api/export', ({ user, body }) => {
   if (buffer.slice(0, 5).toString('latin1') !== '%PDF-') bad('Only PDF documents can be exported.');
 
   const token = crypto.randomBytes(18).toString('hex');
-  fs.writeFileSync(path.join(EXPORTS_DIR, `${token}.pdf`), buffer);
+  await saveExport(`${token}.pdf`, buffer);
   const name = str(body.filename, 120).replace(/[^a-zA-Z0-9._-]+/g, '-') || 'document';
-  /* Older exports are cleaned up so data/ does not grow forever. */
+  /* Older exports are cleaned up so storage does not grow forever. */
   try {
     const files = fs.readdirSync(EXPORTS_DIR)
       .map((f) => ({ f, time: fs.statSync(path.join(EXPORTS_DIR, f)).mtimeMs }))
@@ -288,12 +295,12 @@ add('POST', '/api/export', ({ user, body }) => {
 
 const PHOTO_TYPES = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp' };
 
-function removePhotoFile(photo) {
+async function removePhotoFile(photo) {
   if (!photo || !String(photo).startsWith('/uploads/')) return;
-  try { fs.unlinkSync(path.join(UPLOADS_DIR, path.basename(photo))); } catch { /* already gone */ }
+  await deleteUpload(path.basename(photo));
 }
 
-add('POST', '/api/profile/photo', ({ user, body }) => {
+add('POST', '/api/profile/photo', async ({ user, body }) => {
   const raw = String(body.data || '');
   const match = /^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/=]+)$/.exec(raw);
   if (!match) bad('Choose a JPEG, PNG or WebP image.');
@@ -302,18 +309,18 @@ add('POST', '/api/profile/photo', ({ user, body }) => {
   if (buffer.length > 1_200_000) bad('That photo is too large. Please choose one under 1 MB.');
   const ext = PHOTO_TYPES[match[1]];
   const filename = `u${user.id}-${Date.now()}.${ext}`;
-  fs.writeFileSync(path.join(UPLOADS_DIR, filename), buffer);
-  const previous = db.prepare('SELECT photo FROM users WHERE id = ?').get(user.id)?.photo;
+  await saveUpload(filename, buffer);
+  const previous = getDb().prepare('SELECT photo FROM users WHERE id = ?').get(user.id)?.photo;
   const photo = `/uploads/${filename}`;
-  db.prepare('UPDATE users SET photo = ? WHERE id = ?').run(photo, user.id);
-  removePhotoFile(previous);
+  getDb().prepare('UPDATE users SET photo = ? WHERE id = ?').run(photo, user.id);
+  await removePhotoFile(previous);
   return { photo, user: q.userById.get(user.id) };
 });
 
-add('DELETE', '/api/profile/photo', ({ user }) => {
-  const previous = db.prepare('SELECT photo FROM users WHERE id = ?').get(user.id)?.photo;
-  db.prepare('UPDATE users SET photo = NULL WHERE id = ?').run(user.id);
-  removePhotoFile(previous);
+add('DELETE', '/api/profile/photo', async ({ user }) => {
+  const previous = getDb().prepare('SELECT photo FROM users WHERE id = ?').get(user.id)?.photo;
+  getDb().prepare('UPDATE users SET photo = NULL WHERE id = ?').run(user.id);
+  await removePhotoFile(previous);
   return { ok: true, user: q.userById.get(user.id) };
 });
 
@@ -325,23 +332,23 @@ add('GET', '/api/meta', () => ({
   terms: TERMS,
   assessments: ASSESSMENTS.map(([name, max]) => ({ name, max })),
   days: DAYS,
-  classes: db.prepare(`
+  classes: getDb().prepare(`
     SELECT c.id, c.name, c.level, c.room, c.section_id,
            sec.name AS section_name, sec.code AS section_code
     FROM classes c LEFT JOIN sections sec ON sec.id = c.section_id
     ORDER BY c.name`).all(),
-  sections: db.prepare(`
+  sections: getDb().prepare(`
     SELECT sec.id, sec.name, sec.code, sec.level, sec.head_teacher_id,
            sec.description, u.name AS head, u.photo AS head_photo, u.color AS head_color
     FROM sections sec
     LEFT JOIN teachers t ON t.id = sec.head_teacher_id
     LEFT JOIN users u ON u.id = t.user_id
     ORDER BY sec.name`).all(),
-  subjects: db.prepare(`
+  subjects: getDb().prepare(`
     SELECT s.id, s.name, s.code, s.class_id, s.teacher_id, u.name AS teacher
     FROM subjects s LEFT JOIN teachers t ON t.id = s.teacher_id
     LEFT JOIN users u ON u.id = t.user_id ORDER BY s.name`).all(),
-  teachers: db.prepare(`
+  teachers: getDb().prepare(`
     SELECT t.id, u.name, u.photo, t.specialty FROM teachers t JOIN users u ON u.id = t.user_id
     ORDER BY u.name`).all(),
   today: todayISO(),
@@ -357,42 +364,42 @@ add('GET', '/api/overview', ({ user }) => {
 
   if (user.role === 'admin') {
     const counts = {
-      students: db.prepare('SELECT COUNT(*) n FROM students').get().n,
-      teachers: db.prepare('SELECT COUNT(*) n FROM teachers').get().n,
-      classes: db.prepare('SELECT COUNT(*) n FROM classes').get().n,
-      subjects: db.prepare('SELECT COUNT(*) n FROM subjects').get().n,
+      students: getDb().prepare('SELECT COUNT(*) n FROM students').get().n,
+      teachers: getDb().prepare('SELECT COUNT(*) n FROM teachers').get().n,
+      classes: getDb().prepare('SELECT COUNT(*) n FROM classes').get().n,
+      subjects: getDb().prepare('SELECT COUNT(*) n FROM subjects').get().n,
     };
-    const latest = db.prepare('SELECT MAX(date) d FROM attendance').get().d;
-    const today = db.prepare(`
+    const latest = getDb().prepare('SELECT MAX(date) d FROM attendance').get().d;
+    const today = getDb().prepare(`
       SELECT COUNT(*) total, SUM(CASE WHEN status IN ('present','late') THEN 1 ELSE 0 END) attended,
              SUM(CASE WHEN status = 'absent' THEN 1 ELSE 0 END) absent,
              SUM(CASE WHEN status = 'late' THEN 1 ELSE 0 END) late
       FROM attendance WHERE date = ?`).get(latest) || {};
-    const fees = db.prepare('SELECT SUM(amount) billed, SUM(paid) paid FROM fees').get() || {};
-    const performance = db.prepare(`
+    const fees = getDb().prepare('SELECT SUM(amount) billed, SUM(paid) paid FROM fees').get() || {};
+    const performance = getDb().prepare(`
       SELECT AVG(score * 100.0 / max_score) pct FROM grades`).get() || {};
-    const classRows = db.prepare(`
+    const classRows = getDb().prepare(`
       SELECT c.id, c.name, COUNT(DISTINCT s.id) students,
              AVG(g.score * 100.0 / g.max_score) pct
       FROM classes c LEFT JOIN students s ON s.class_id = c.id
       LEFT JOIN grades g ON g.student_id = s.id
       GROUP BY c.id ORDER BY c.name`).all();
-    const gender = db.prepare(`
+    const gender = getDb().prepare(`
       SELECT gender, COUNT(*) n FROM students GROUP BY gender`).all();
-    const top = db.prepare(`
+    const top = getDb().prepare(`
       SELECT s.id, u.name, u.photo, u.color, c.name AS class_name,
              SUM(g.score) * 100.0 / SUM(g.max_score) pct
       FROM students s JOIN users u ON u.id = s.user_id
       LEFT JOIN classes c ON c.id = s.class_id
       JOIN grades g ON g.student_id = s.id
       GROUP BY s.id ORDER BY pct DESC LIMIT 5`).all();
-    const recentFees = db.prepare(`
+    const recentFees = getDb().prepare(`
       SELECT f.id, f.description, f.amount, f.paid, f.due_date, u.name AS student,
              c.name AS class_name
       FROM fees f JOIN students s ON s.id = f.student_id
       JOIN users u ON u.id = s.user_id LEFT JOIN classes c ON c.id = s.class_id
       WHERE f.paid < f.amount ORDER BY f.due_date ASC LIMIT 5`).all();
-    const sections = db.prepare('SELECT id FROM sections ORDER BY name').all()
+    const sections = getDb().prepare('SELECT id FROM sections ORDER BY name').all()
       .map((s) => sectionStats(s.id));
 
     return {
@@ -424,42 +431,42 @@ add('GET', '/api/overview', ({ user }) => {
   }
 
   if (user.role === 'teacher') {
-    const classes = db.prepare(`
+    const classes = getDb().prepare(`
       SELECT DISTINCT c.id, c.name, c.level, c.room, c.section_id,
              sec.name AS section_name, sec.code AS section_code
       FROM classes c LEFT JOIN subjects sub ON sub.class_id = c.id
       LEFT JOIN sections sec ON sec.id = c.section_id
       WHERE c.form_teacher_id = ? OR sub.teacher_id = ?
       ORDER BY c.name`).all(user.teacher_id, user.teacher_id);
-    const subjects = db.prepare(`
+    const subjects = getDb().prepare(`
       SELECT s.id, s.name, s.code, c.name AS class_name
       FROM subjects s LEFT JOIN classes c ON c.id = s.class_id
       WHERE s.teacher_id = ? ORDER BY c.name, s.name`).all(user.teacher_id);
     const studentCount = classes.length
-      ? db.prepare(`SELECT COUNT(*) n FROM students WHERE class_id IN (${classes.map(() => '?').join(',')})`)
+      ? getDb().prepare(`SELECT COUNT(*) n FROM students WHERE class_id IN (${classes.map(() => '?').join(',')})`)
         .get(...classes.map((c) => c.id)).n
       : 0;
-    const latest = db.prepare('SELECT MAX(date) d FROM attendance').get().d;
+    const latest = getDb().prepare('SELECT MAX(date) d FROM attendance').get().d;
     const today = classes.length
-      ? db.prepare(`
+      ? getDb().prepare(`
           SELECT COUNT(*) total, SUM(CASE WHEN status IN ('present','late') THEN 1 ELSE 0 END) attended
           FROM attendance WHERE date = ? AND class_id IN (${classes.map(() => '?').join(',')})`)
         .get(latest, ...classes.map((c) => c.id)) || {}
       : {};
     const perf = subjects.length
-      ? db.prepare(`
+      ? getDb().prepare(`
           SELECT AVG(score * 100.0 / max_score) pct FROM grades
           WHERE subject_id IN (${subjects.map(() => '?').join(',')})`)
         .get(...subjects.map((s) => s.id)) || {}
       : {};
     const dow = new Date().toLocaleDateString('en-US', { weekday: 'long' });
-    const schedule = db.prepare(`
+    const schedule = getDb().prepare(`
       SELECT t.start_time, t.end_time, t.room, sub.name AS subject, c.name AS class_name
       FROM timetable t JOIN subjects sub ON sub.id = t.subject_id
       JOIN classes c ON c.id = t.class_id
       WHERE t.day = ? AND sub.teacher_id = ?
       ORDER BY t.start_time`).all(dow, user.teacher_id);
-    const pending = db.prepare(`
+    const pending = getDb().prepare(`
       SELECT COUNT(*) n FROM students s
       WHERE s.class_id IN (${classes.length ? classes.map(() => '?').join(',') : 'NULL'})
         AND NOT EXISTS (SELECT 1 FROM attendance a WHERE a.student_id = s.id AND a.date = ?)`)
@@ -485,7 +492,7 @@ add('GET', '/api/overview', ({ user }) => {
   }
 
   /* student */
-  const student = db.prepare(`
+  const student = getDb().prepare(`
     SELECT s.*, u.name, u.email, u.color, u.photo, c.name AS class_name, c.room,
            c.section_id, sec.name AS section_name, sec.code AS section_code,
            u2.name AS form_teacher
@@ -497,20 +504,20 @@ add('GET', '/api/overview', ({ user }) => {
     WHERE s.id = ?`).get(user.student_id);
   if (!student) throw new HttpError(404, 'Student profile not found.');
   const summary = studentSummary(student.id);
-  const grades = db.prepare(`
+  const grades = getDb().prepare(`
     SELECT sub.name AS subject, SUM(g.score) score, SUM(g.max_score) max
     FROM grades g JOIN subjects sub ON sub.id = g.subject_id
     WHERE g.student_id = ? GROUP BY sub.id ORDER BY sub.name`).all(student.id);
   const dow = new Date().toLocaleDateString('en-US', { weekday: 'long' });
-  const schedule = db.prepare(`
+  const schedule = getDb().prepare(`
     SELECT t.start_time, t.end_time, t.room, sub.name AS subject, u.name AS teacher
     FROM timetable t JOIN subjects sub ON sub.id = t.subject_id
     LEFT JOIN teachers te ON te.id = sub.teacher_id LEFT JOIN users u ON u.id = te.user_id
     WHERE t.class_id = ? AND t.day = ? ORDER BY t.start_time`).all(student.class_id, dow);
-  const fees = db.prepare(`
+  const fees = getDb().prepare(`
     SELECT * FROM fees WHERE student_id = ? ORDER BY due_date`).all(student.id)
     .map((f) => ({ ...f, status: feeStatus(f) }));
-  const recent = db.prepare(`
+  const recent = getDb().prepare(`
     SELECT a.date, a.status FROM attendance a WHERE a.student_id = ?
     ORDER BY a.date DESC LIMIT 8`).all(student.id);
   const feeBalance = fees.reduce((n, f) => n + (f.amount - f.paid), 0);
@@ -552,7 +559,7 @@ add('GET', '/api/students', ({ user, query }) => {
     params.push(term, term);
   }
   if (query.status) { where.push('s.status = ?'); params.push(str(query.status, 20)); }
-  const rows = db.prepare(`
+  const rows = getDb().prepare(`
     SELECT s.id, s.admission_no, s.gender, s.class_id, s.status, s.guardian_name,
            s.guardian_phone, s.user_id, u.name, u.email, u.phone, u.color, u.photo,
            c.name AS class_name
@@ -568,7 +575,7 @@ add('GET', '/api/students/:id', ({ user, params }) => {
   if (user.role === 'student' && user.student_id !== id) {
     throw new HttpError(403, 'You can only view your own profile.');
   }
-  const student = db.prepare(`
+  const student = getDb().prepare(`
     SELECT s.*, u.name, u.email, u.phone, u.color, u.photo,
            c.name AS class_name, c.room, c.section_id,
            sec.name AS section_name, sec.code AS section_code
@@ -578,7 +585,7 @@ add('GET', '/api/students/:id', ({ user, params }) => {
     WHERE s.id = ?`).get(id);
   if (!student) throw new HttpError(404, 'Student not found.');
 
-  const subjectGrades = db.prepare(`
+  const subjectGrades = getDb().prepare(`
     SELECT sub.id, sub.name, sub.code, t.name AS teacher,
            SUM(g.score) score, SUM(g.max_score) max
     FROM grades g JOIN subjects sub ON sub.id = g.subject_id
@@ -591,15 +598,15 @@ add('GET', '/api/students/:id', ({ user, params }) => {
       grade: letterGrade((g.score * 100) / g.max),
     }));
 
-  const attendance = db.prepare(`
+  const attendance = getDb().prepare(`
     SELECT date, status, note FROM attendance WHERE student_id = ?
     ORDER BY date DESC LIMIT 20`).all(id);
 
-  const fees = db.prepare(`
+  const fees = getDb().prepare(`
     SELECT * FROM fees WHERE student_id = ? ORDER BY due_date`).all(id)
     .map((f) => ({ ...f, status: feeStatus(f) }));
 
-  const assessmentRows = db.prepare(`
+  const assessmentRows = getDb().prepare(`
     SELECT g.*, sub.name AS subject FROM grades g
     JOIN subjects sub ON sub.id = g.subject_id
     WHERE g.student_id = ? ORDER BY sub.name, g.id`).all(id);
@@ -622,34 +629,34 @@ add('POST', '/api/students', ({ user, body }) => {
   if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) bad('Enter a valid email address.');
   if (q.userByEmail.get(email)) throw new HttpError(409, 'A user with that email already exists.');
   const classId = body.class_id ? num(body.class_id) : null;
-  if (classId && !db.prepare('SELECT 1 FROM classes WHERE id = ?').get(classId)) {
+  if (classId && !getDb().prepare('SELECT 1 FROM classes WHERE id = ?').get(classId)) {
     bad('Selected class does not exist.');
   }
-  const count = db.prepare('SELECT COUNT(*) n FROM students').get().n;
+  const count = getDb().prepare('SELECT COUNT(*) n FROM students').get().n;
   const admissionNo = str(body.admission_no, 40) || `GA/2026/${String(count + 1).padStart(3, '0')}`;
-  if (db.prepare('SELECT 1 FROM students WHERE admission_no = ?').get(admissionNo)) {
+  if (getDb().prepare('SELECT 1 FROM students WHERE admission_no = ?').get(admissionNo)) {
     throw new HttpError(409, 'That admission number is already in use.');
   }
   const password = str(body.password, 100) || 'student123';
   const color = ['#4f46e5', '#0ea5e9', '#10b981', '#f59e0b', '#8b5cf6', '#ec4899'][count % 6];
 
-  db.exec('BEGIN');
+  getDb().exec('BEGIN');
   let studentId;
   try {
-    const userId = Number(db.prepare(`
+    const userId = Number(getDb().prepare(`
       INSERT INTO users (name, email, password_hash, role, phone, color)
       VALUES (?, ?, ?, 'student', ?, ?)`)
       .run(name, email, hashPassword(password), str(body.phone, 40), color).lastInsertRowid);
-    studentId = Number(db.prepare(`
+    studentId = Number(getDb().prepare(`
       INSERT INTO students (user_id, admission_no, class_id, gender, dob,
         guardian_name, guardian_phone, address)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(userId, admissionNo, classId, str(body.gender, 10), str(body.dob, 20),
         str(body.guardian_name, 120), str(body.guardian_phone, 40), str(body.address, 300))
       .lastInsertRowid);
-    db.exec('COMMIT');
+    getDb().exec('COMMIT');
   } catch (err) {
-    db.exec('ROLLBACK');
+    getDb().exec('ROLLBACK');
     throw err;
   }
   return { id: studentId, admission_no: admissionNo };
@@ -658,19 +665,19 @@ add('POST', '/api/students', ({ user, body }) => {
 add('PATCH', '/api/students/:id', ({ user, params, body }) => {
   if (user.role !== 'admin') throw new HttpError(403, 'Only administrators can edit students.');
   const id = num(params.id);
-  const student = db.prepare('SELECT * FROM students WHERE id = ?').get(id);
+  const student = getDb().prepare('SELECT * FROM students WHERE id = ?').get(id);
   if (!student) throw new HttpError(404, 'Student not found.');
   const name = str(body.name, 120) || null;
   const email = body.email ? str(body.email, 160).toLowerCase() : null;
-  if (email && email !== db.prepare('SELECT email FROM users WHERE id = ?').get(student.user_id).email) {
+  if (email && email !== getDb().prepare('SELECT email FROM users WHERE id = ?').get(student.user_id).email) {
     if (q.userByEmail.get(email)) throw new HttpError(409, 'A user with that email already exists.');
   }
-  db.exec('BEGIN');
+  getDb().exec('BEGIN');
   try {
-    db.prepare(`
+    getDb().prepare(`
       UPDATE users SET name = COALESCE(?, name), email = COALESCE(?, email), phone = COALESCE(?, phone)
       WHERE id = ?`).run(name, email, body.phone === undefined ? null : str(body.phone, 40), student.user_id);
-    db.prepare(`
+    getDb().prepare(`
       UPDATE students SET class_id = ?, gender = COALESCE(?, gender), dob = COALESCE(?, dob),
         guardian_name = COALESCE(?, guardian_name), guardian_phone = COALESCE(?, guardian_phone),
         address = COALESCE(?, address), status = COALESCE(?, status)
@@ -684,9 +691,9 @@ add('PATCH', '/api/students/:id', ({ user, params, body }) => {
       body.status === undefined ? null : str(body.status, 20),
       id
     );
-    db.exec('COMMIT');
+    getDb().exec('COMMIT');
   } catch (err) {
-    db.exec('ROLLBACK');
+    getDb().exec('ROLLBACK');
     throw err;
   }
   return { ok: true };
@@ -694,9 +701,9 @@ add('PATCH', '/api/students/:id', ({ user, params, body }) => {
 
 add('DELETE', '/api/students/:id', ({ user, params }) => {
   if (user.role !== 'admin') throw new HttpError(403, 'Only administrators can remove students.');
-  const student = db.prepare('SELECT user_id FROM students WHERE id = ?').get(num(params.id));
+  const student = getDb().prepare('SELECT user_id FROM students WHERE id = ?').get(num(params.id));
   if (!student) throw new HttpError(404, 'Student not found.');
-  db.prepare('DELETE FROM users WHERE id = ?').run(student.user_id);
+  getDb().prepare('DELETE FROM users WHERE id = ?').run(student.user_id);
   return { ok: true };
 });
 
@@ -704,7 +711,7 @@ add('DELETE', '/api/students/:id', ({ user, params }) => {
 
 add('GET', '/api/teachers', ({ user }) => {
   assertStaff(user);
-  return db.prepare(`
+  return getDb().prepare(`
     SELECT t.id, t.staff_no, t.specialty, t.qualification, t.hired_at,
            u.id AS user_id, u.name, u.email, u.phone, u.color, u.photo,
            (SELECT COUNT(*) FROM subjects s WHERE s.teacher_id = t.id) AS subject_count,
@@ -719,24 +726,24 @@ add('POST', '/api/teachers', ({ user, body }) => {
   if (!name || !email) bad('Name and email are required.');
   if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) bad('Enter a valid email address.');
   if (q.userByEmail.get(email)) throw new HttpError(409, 'A user with that email already exists.');
-  const count = db.prepare('SELECT COUNT(*) n FROM teachers').get().n;
+  const count = getDb().prepare('SELECT COUNT(*) n FROM teachers').get().n;
   const password = str(body.password, 100) || 'teach123';
-  db.exec('BEGIN');
+  getDb().exec('BEGIN');
   let id;
   try {
-    const userId = Number(db.prepare(`
+    const userId = Number(getDb().prepare(`
       INSERT INTO users (name, email, password_hash, role, phone, color)
       VALUES (?, ?, ?, 'teacher', ?, ?)`)
       .run(name, email, hashPassword(password), str(body.phone, 40), '#0ea5e9').lastInsertRowid);
-    id = Number(db.prepare(`
+    id = Number(getDb().prepare(`
       INSERT INTO teachers (user_id, staff_no, specialty, qualification, hired_at)
       VALUES (?, ?, ?, ?, ?)`)
       .run(userId, str(body.staff_no, 40) || `GA/T/${String(101 + count).padStart(3, '0')}`,
         str(body.specialty, 120), str(body.qualification, 160), str(body.hired_at, 20) || todayISO())
       .lastInsertRowid);
-    db.exec('COMMIT');
+    getDb().exec('COMMIT');
   } catch (err) {
-    db.exec('ROLLBACK');
+    getDb().exec('ROLLBACK');
     throw err;
   }
   return { id };
@@ -744,25 +751,25 @@ add('POST', '/api/teachers', ({ user, body }) => {
 
 add('PATCH', '/api/teachers/:id', ({ user, params, body }) => {
   if (user.role !== 'admin') throw new HttpError(403, 'Only administrators can edit teachers.');
-  const t = db.prepare('SELECT * FROM teachers WHERE id = ?').get(num(params.id));
+  const t = getDb().prepare('SELECT * FROM teachers WHERE id = ?').get(num(params.id));
   if (!t) throw new HttpError(404, 'Teacher not found.');
-  db.exec('BEGIN');
+  getDb().exec('BEGIN');
   try {
-    db.prepare(`
+    getDb().prepare(`
       UPDATE users SET name = COALESCE(?, name), email = COALESCE(?, email), phone = COALESCE(?, phone)
       WHERE id = ?`).run(str(body.name, 120) || null,
       body.email ? str(body.email, 160).toLowerCase() : null,
       body.phone === undefined ? null : str(body.phone, 40), t.user_id);
-    db.prepare(`
+    getDb().prepare(`
       UPDATE teachers SET specialty = COALESCE(?, specialty),
         qualification = COALESCE(?, qualification), hired_at = COALESCE(?, hired_at)
       WHERE id = ?`).run(
       body.specialty === undefined ? null : str(body.specialty, 120),
       body.qualification === undefined ? null : str(body.qualification, 160),
       body.hired_at === undefined ? null : str(body.hired_at, 20), t.id);
-    db.exec('COMMIT');
+    getDb().exec('COMMIT');
   } catch (err) {
-    db.exec('ROLLBACK');
+    getDb().exec('ROLLBACK');
     throw err;
   }
   return { ok: true };
@@ -770,16 +777,16 @@ add('PATCH', '/api/teachers/:id', ({ user, params, body }) => {
 
 add('DELETE', '/api/teachers/:id', ({ user, params }) => {
   if (user.role !== 'admin') throw new HttpError(403, 'Only administrators can remove teachers.');
-  const t = db.prepare('SELECT user_id FROM teachers WHERE id = ?').get(num(params.id));
+  const t = getDb().prepare('SELECT user_id FROM teachers WHERE id = ?').get(num(params.id));
   if (!t) throw new HttpError(404, 'Teacher not found.');
-  db.prepare('DELETE FROM users WHERE id = ?').run(t.user_id);
+  getDb().prepare('DELETE FROM users WHERE id = ?').run(t.user_id);
   return { ok: true };
 });
 
 /* ---- sections ---- */
 
 function sectionStats(sectionId) {
-  const section = db.prepare(`
+  const section = getDb().prepare(`
     SELECT sec.*, u.name AS head, u.photo AS head_photo, u.color AS head_color,
            t.specialty AS head_specialty
     FROM sections sec
@@ -787,24 +794,24 @@ function sectionStats(sectionId) {
     LEFT JOIN users u ON u.id = t.user_id
     WHERE sec.id = ?`).get(sectionId);
   if (!section) return null;
-  const classes = db.prepare('SELECT id FROM classes WHERE section_id = ?').all(sectionId)
+  const classes = getDb().prepare('SELECT id FROM classes WHERE section_id = ?').all(sectionId)
     .map((c) => classStats(c.id));
-  const students = db.prepare(`
+  const students = getDb().prepare(`
     SELECT COUNT(*) n FROM students s JOIN classes c ON c.id = s.class_id
     WHERE c.section_id = ?`).get(sectionId).n;
-  const teachers = db.prepare(`
+  const teachers = getDb().prepare(`
     SELECT COUNT(DISTINCT sub.teacher_id) n FROM subjects sub
     JOIN classes c ON c.id = sub.class_id
     WHERE c.section_id = ? AND sub.teacher_id IS NOT NULL`).get(sectionId).n;
-  const perf = db.prepare(`
+  const perf = getDb().prepare(`
     SELECT AVG(g.score * 100.0 / g.max_score) pct FROM grades g
     JOIN students s ON s.id = g.student_id JOIN classes c ON c.id = s.class_id
     WHERE c.section_id = ?`).get(sectionId) || {};
-  const att = db.prepare(`
+  const att = getDb().prepare(`
     SELECT COUNT(*) total, SUM(CASE WHEN a.status IN ('present','late') THEN 1 ELSE 0 END) attended
     FROM attendance a JOIN classes c ON c.id = a.class_id
     WHERE c.section_id = ?`).get(sectionId) || {};
-  const fees = db.prepare(`
+  const fees = getDb().prepare(`
     SELECT SUM(f.amount) billed, SUM(f.paid) paid FROM fees f
     JOIN students s ON s.id = f.student_id JOIN classes c ON c.id = s.class_id
     WHERE c.section_id = ?`).get(sectionId) || {};
@@ -822,7 +829,7 @@ function sectionStats(sectionId) {
 }
 
 add('GET', '/api/sections', ({ user }) => {
-  const ids = db.prepare('SELECT id FROM sections ORDER BY name').all();
+  const ids = getDb().prepare('SELECT id FROM sections ORDER BY name').all();
   const rows = ids.map((r) => sectionStats(r.id));
   if (user.role === 'student' && user.section_name) {
     return rows.map((s) => ({ ...s, current: s.name === user.section_name }));
@@ -833,15 +840,15 @@ add('GET', '/api/sections', ({ user }) => {
 add('GET', '/api/sections/:id', ({ user, params }) => {
   const section = sectionStats(num(params.id));
   if (!section) throw new HttpError(404, 'Section not found.');
-  const classes = db.prepare('SELECT id FROM classes WHERE section_id = ? ORDER BY name')
+  const classes = getDb().prepare('SELECT id FROM classes WHERE section_id = ? ORDER BY name')
     .all(section.id).map((c) => classStats(c.id));
-  const teachers = db.prepare(`
+  const teachers = getDb().prepare(`
     SELECT DISTINCT t.id, u.name, u.email, u.photo, t.specialty,
            (SELECT COUNT(*) FROM subjects sub WHERE sub.teacher_id = t.id) AS subject_count
     FROM subjects sub JOIN classes c ON c.id = sub.class_id
     JOIN teachers t ON t.id = sub.teacher_id JOIN users u ON u.id = t.user_id
     WHERE c.section_id = ? ORDER BY u.name`).all(section.id);
-  const top = db.prepare(`
+  const top = getDb().prepare(`
     SELECT s.id, u.name, u.photo, c.name AS class_name,
            SUM(g.score) * 100.0 / SUM(g.max_score) pct
     FROM students s JOIN users u ON u.id = s.user_id
@@ -857,17 +864,17 @@ add('POST', '/api/sections', ({ user, body }) => {
   const name = str(body.name, 80);
   const code = str(body.code, 12).toUpperCase();
   if (!name) bad('Section name is required.');
-  if (db.prepare('SELECT 1 FROM sections WHERE lower(name) = lower(?)').get(name)) {
+  if (getDb().prepare('SELECT 1 FROM sections WHERE lower(name) = lower(?)').get(name)) {
     throw new HttpError(409, 'A section with that name already exists.');
   }
-  if (code && db.prepare('SELECT 1 FROM sections WHERE code = ?').get(code)) {
+  if (code && getDb().prepare('SELECT 1 FROM sections WHERE code = ?').get(code)) {
     throw new HttpError(409, 'That section code is already in use.');
   }
   const head = body.head_teacher_id ? num(body.head_teacher_id) : null;
-  if (head && !db.prepare('SELECT 1 FROM teachers WHERE id = ?').get(head)) {
+  if (head && !getDb().prepare('SELECT 1 FROM teachers WHERE id = ?').get(head)) {
     bad('The selected head of section does not exist.');
   }
-  const id = Number(db.prepare(`
+  const id = Number(getDb().prepare(`
     INSERT INTO sections (name, code, level, head_teacher_id, description)
     VALUES (?, ?, ?, ?, ?)`)
     .run(name, code || null, str(body.level, 30) || null, head,
@@ -878,23 +885,23 @@ add('POST', '/api/sections', ({ user, body }) => {
 add('PATCH', '/api/sections/:id', ({ user, params, body }) => {
   if (user.role !== 'admin') throw new HttpError(403, 'Only administrators can edit sections.');
   const id = num(params.id);
-  const section = db.prepare('SELECT * FROM sections WHERE id = ?').get(id);
+  const section = getDb().prepare('SELECT * FROM sections WHERE id = ?').get(id);
   if (!section) throw new HttpError(404, 'Section not found.');
   const name = str(body.name, 80) || null;
-  if (name && db.prepare('SELECT 1 FROM sections WHERE lower(name) = lower(?) AND id <> ?').get(name, id)) {
+  if (name && getDb().prepare('SELECT 1 FROM sections WHERE lower(name) = lower(?) AND id <> ?').get(name, id)) {
     throw new HttpError(409, 'A section with that name already exists.');
   }
   const code = body.code === undefined ? null : (str(body.code, 12).toUpperCase() || null);
-  if (code && db.prepare('SELECT 1 FROM sections WHERE code = ? AND id <> ?').get(code, id)) {
+  if (code && getDb().prepare('SELECT 1 FROM sections WHERE code = ? AND id <> ?').get(code, id)) {
     throw new HttpError(409, 'That section code is already in use.');
   }
   const head = body.head_teacher_id === undefined
     ? section.head_teacher_id
     : (body.head_teacher_id ? num(body.head_teacher_id) : null);
-  if (head && !db.prepare('SELECT 1 FROM teachers WHERE id = ?').get(head)) {
+  if (head && !getDb().prepare('SELECT 1 FROM teachers WHERE id = ?').get(head)) {
     bad('The selected head of section does not exist.');
   }
-  db.prepare(`
+  getDb().prepare(`
     UPDATE sections SET name = COALESCE(?, name), code = COALESCE(?, code),
       level = COALESCE(?, level), head_teacher_id = ?, description = COALESCE(?, description)
     WHERE id = ?`).run(name, code, str(body.level, 30) || null, head,
@@ -904,14 +911,14 @@ add('PATCH', '/api/sections/:id', ({ user, params, body }) => {
 
 add('DELETE', '/api/sections/:id', ({ user, params }) => {
   if (user.role !== 'admin') throw new HttpError(403, 'Only administrators can delete sections.');
-  db.prepare('DELETE FROM sections WHERE id = ?').run(num(params.id));
+  getDb().prepare('DELETE FROM sections WHERE id = ?').run(num(params.id));
   return { ok: true };
 });
 
 /* ---- classes ---- */
 
 add('GET', '/api/classes', ({ user }) => {
-  const rows = db.prepare(`
+  const rows = getDb().prepare(`
     SELECT c.id, c.name, c.level, c.room, c.capacity, c.form_teacher_id,
            c.section_id, sec.name AS section_name, sec.code AS section_code,
            u.name AS form_teacher, u.photo AS form_teacher_photo
@@ -935,14 +942,14 @@ add('POST', '/api/classes', ({ user, body }) => {
   if (user.role !== 'admin') throw new HttpError(403, 'Only administrators can create classes.');
   const name = str(body.name, 60);
   if (!name) bad('Class name is required.');
-  if (db.prepare('SELECT 1 FROM classes WHERE lower(name) = lower(?)').get(name)) {
+  if (getDb().prepare('SELECT 1 FROM classes WHERE lower(name) = lower(?)').get(name)) {
     throw new HttpError(409, 'A class with that name already exists.');
   }
   const sectionId = body.section_id ? num(body.section_id) : null;
-  if (sectionId && !db.prepare('SELECT 1 FROM sections WHERE id = ?').get(sectionId)) {
+  if (sectionId && !getDb().prepare('SELECT 1 FROM sections WHERE id = ?').get(sectionId)) {
     bad('Selected section does not exist.');
   }
-  const id = Number(db.prepare(`
+  const id = Number(getDb().prepare(`
     INSERT INTO classes (name, level, section_id, form_teacher_id, room, capacity) VALUES (?, ?, ?, ?, ?, ?)`)
     .run(name, str(body.level, 30) || 'Junior', sectionId,
       body.form_teacher_id ? num(body.form_teacher_id) : null,
@@ -953,12 +960,12 @@ add('POST', '/api/classes', ({ user, body }) => {
 add('PATCH', '/api/classes/:id', ({ user, params, body }) => {
   if (user.role !== 'admin') throw new HttpError(403, 'Only administrators can edit classes.');
   const id = num(params.id);
-  const cls = db.prepare('SELECT * FROM classes WHERE id = ?').get(id);
+  const cls = getDb().prepare('SELECT * FROM classes WHERE id = ?').get(id);
   if (!cls) throw new HttpError(404, 'Class not found.');
-  if (body.section_id && !db.prepare('SELECT 1 FROM sections WHERE id = ?').get(num(body.section_id))) {
+  if (body.section_id && !getDb().prepare('SELECT 1 FROM sections WHERE id = ?').get(num(body.section_id))) {
     bad('Selected section does not exist.');
   }
-  db.prepare(`
+  getDb().prepare(`
     UPDATE classes SET name = COALESCE(?, name), level = COALESCE(?, level),
       section_id = ?, form_teacher_id = ?, room = COALESCE(?, room), capacity = COALESCE(?, capacity)
     WHERE id = ?`).run(
@@ -976,7 +983,7 @@ add('PATCH', '/api/classes/:id', ({ user, params, body }) => {
 
 add('DELETE', '/api/classes/:id', ({ user, params }) => {
   if (user.role !== 'admin') throw new HttpError(403, 'Only administrators can delete classes.');
-  db.prepare('DELETE FROM classes WHERE id = ?').run(num(params.id));
+  getDb().prepare('DELETE FROM classes WHERE id = ?').run(num(params.id));
   return { ok: true };
 });
 
@@ -984,12 +991,12 @@ add('DELETE', '/api/classes/:id', ({ user, params }) => {
 
 add('GET', '/api/subjects', ({ query }) => {
   const rows = query.class_id
-    ? db.prepare(`
+    ? getDb().prepare(`
         SELECT s.*, u.name AS teacher, c.name AS class_name FROM subjects s
         LEFT JOIN teachers t ON t.id = s.teacher_id LEFT JOIN users u ON u.id = t.user_id
         LEFT JOIN classes c ON c.id = s.class_id
         WHERE s.class_id = ? ORDER BY s.name`).all(num(query.class_id))
-    : db.prepare(`
+    : getDb().prepare(`
         SELECT s.*, u.name AS teacher, c.name AS class_name FROM subjects s
         LEFT JOIN teachers t ON t.id = s.teacher_id LEFT JOIN users u ON u.id = t.user_id
         LEFT JOIN classes c ON c.id = s.class_id
@@ -1003,10 +1010,10 @@ add('POST', '/api/subjects', ({ user, body }) => {
   const code = str(body.code, 20).toUpperCase();
   const classId = num(body.class_id);
   if (!name || !code || !classId) bad('Subject name, code and class are required.');
-  if (db.prepare('SELECT 1 FROM subjects WHERE code = ?').get(code)) {
+  if (getDb().prepare('SELECT 1 FROM subjects WHERE code = ?').get(code)) {
     throw new HttpError(409, 'That subject code is already in use.');
   }
-  const id = Number(db.prepare(`
+  const id = Number(getDb().prepare(`
     INSERT INTO subjects (name, code, teacher_id, class_id, periods) VALUES (?, ?, ?, ?, ?)`)
     .run(name, code, body.teacher_id ? num(body.teacher_id) : null, classId,
       num(body.periods, 4)).lastInsertRowid);
@@ -1015,9 +1022,9 @@ add('POST', '/api/subjects', ({ user, body }) => {
 
 add('PATCH', '/api/subjects/:id', ({ user, params, body }) => {
   if (user.role !== 'admin') throw new HttpError(403, 'Only administrators can edit subjects.');
-  const s = db.prepare('SELECT * FROM subjects WHERE id = ?').get(num(params.id));
+  const s = getDb().prepare('SELECT * FROM subjects WHERE id = ?').get(num(params.id));
   if (!s) throw new HttpError(404, 'Subject not found.');
-  db.prepare(`
+  getDb().prepare(`
     UPDATE subjects SET name = COALESCE(?, name), teacher_id = ?, periods = COALESCE(?, periods)
     WHERE id = ?`).run(
     str(body.name, 80) || null,
@@ -1028,7 +1035,7 @@ add('PATCH', '/api/subjects/:id', ({ user, params, body }) => {
 
 add('DELETE', '/api/subjects/:id', ({ user, params }) => {
   if (user.role !== 'admin') throw new HttpError(403, 'Only administrators can delete subjects.');
-  db.prepare('DELETE FROM subjects WHERE id = ?').run(num(params.id));
+  getDb().prepare('DELETE FROM subjects WHERE id = ?').run(num(params.id));
   return { ok: true };
 });
 
@@ -1039,9 +1046,9 @@ add('GET', '/api/attendance', ({ user, query }) => {
   const classId = num(query.class_id);
   const date = /^\d{4}-\d{2}-\d{2}$/.test(query.date || '') ? query.date : todayISO();
   if (!classId) bad('class_id is required.');
-  const cls = db.prepare('SELECT id, name, room FROM classes WHERE id = ?').get(classId);
+  const cls = getDb().prepare('SELECT id, name, room FROM classes WHERE id = ?').get(classId);
   if (!cls) throw new HttpError(404, 'Class not found.');
-  const rows = db.prepare(`
+  const rows = getDb().prepare(`
     SELECT s.id, s.admission_no, u.name, u.color, u.photo, a.status, a.note
     FROM students s JOIN users u ON u.id = s.user_id
     LEFT JOIN attendance a ON a.student_id = s.id AND a.date = ?
@@ -1061,15 +1068,15 @@ add('POST', '/api/attendance', ({ user, body }) => {
   const records = Array.isArray(body.records) ? body.records : [];
   if (!classId || !records.length) bad('class_id and at least one record are required.');
   const valid = new Set(['present', 'absent', 'late', 'excused']);
-  const roster = new Set(db.prepare('SELECT id FROM students WHERE class_id = ?')
+  const roster = new Set(getDb().prepare('SELECT id FROM students WHERE class_id = ?')
     .all(classId).map((r) => r.id));
-  const stmt = db.prepare(`
+  const stmt = getDb().prepare(`
     INSERT INTO attendance (student_id, class_id, date, status, note, recorded_by)
     VALUES (?, ?, ?, ?, ?, ?)
     ON CONFLICT (student_id, date) DO UPDATE SET
       status = excluded.status, note = excluded.note, recorded_by = excluded.recorded_by`);
   let saved = 0;
-  db.exec('BEGIN');
+  getDb().exec('BEGIN');
   try {
     for (const r of records) {
       const sid = num(r.student_id);
@@ -1078,9 +1085,9 @@ add('POST', '/api/attendance', ({ user, body }) => {
       stmt.run(sid, classId, date, status, str(r.note, 200), user.id);
       saved += 1;
     }
-    db.exec('COMMIT');
+    getDb().exec('COMMIT');
   } catch (err) {
-    db.exec('ROLLBACK');
+    getDb().exec('ROLLBACK');
     throw err;
   }
   return { saved, date };
@@ -1100,12 +1107,12 @@ add('GET', '/api/grades/sheet', ({ user, query }) => {
   const subjectId = num(query.subject_id);
   const term = str(query.term, 60) || TERM;
   if (!classId || !subjectId) bad('class_id and subject_id are required.');
-  const subject = db.prepare('SELECT * FROM subjects WHERE id = ?').get(subjectId);
+  const subject = getDb().prepare('SELECT * FROM subjects WHERE id = ?').get(subjectId);
   if (!subject) throw new HttpError(404, 'Subject not found.');
-  const students = db.prepare(`
+  const students = getDb().prepare(`
     SELECT s.id, s.admission_no, u.name FROM students s JOIN users u ON u.id = s.user_id
     WHERE s.class_id = ? ORDER BY u.name`).all(classId);
-  const existing = db.prepare(`
+  const existing = getDb().prepare(`
     SELECT g.student_id, g.assessment, g.score FROM grades g
     JOIN students s ON s.id = g.student_id
     WHERE s.class_id = ? AND g.subject_id = ? AND g.term = ?`)
@@ -1127,17 +1134,17 @@ add('POST', '/api/grades/sheet', ({ user, body }) => {
   const term = str(body.term, 60) || TERM;
   const rows = Array.isArray(body.rows) ? body.rows : [];
   if (!subjectId || !rows.length) bad('subject_id and rows are required.');
-  const subject = db.prepare('SELECT * FROM subjects WHERE id = ?').get(subjectId);
+  const subject = getDb().prepare('SELECT * FROM subjects WHERE id = ?').get(subjectId);
   if (!subject) throw new HttpError(404, 'Subject not found.');
-  const roster = new Set(db.prepare('SELECT id FROM students WHERE class_id = ?')
+  const roster = new Set(getDb().prepare('SELECT id FROM students WHERE class_id = ?')
     .all(subject.class_id).map((r) => r.id));
-  const stmt = db.prepare(`
+  const stmt = getDb().prepare(`
     INSERT INTO grades (student_id, subject_id, term, assessment, score, max_score, recorded_by)
     VALUES (?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT (student_id, subject_id, term, assessment) DO UPDATE SET
       score = excluded.score, max_score = excluded.max_score, recorded_by = excluded.recorded_by`);
   let saved = 0;
-  db.exec('BEGIN');
+  getDb().exec('BEGIN');
   try {
     for (const row of rows) {
       const sid = num(row.student_id);
@@ -1150,9 +1157,9 @@ add('POST', '/api/grades/sheet', ({ user, body }) => {
         saved += 1;
       }
     }
-    db.exec('COMMIT');
+    getDb().exec('COMMIT');
   } catch (err) {
-    db.exec('ROLLBACK');
+    getDb().exec('ROLLBACK');
     throw err;
   }
   return { saved };
@@ -1163,7 +1170,7 @@ add('GET', '/api/grades/student/:id', ({ user, params }) => {
   if (user.role === 'student' && user.student_id !== id) {
     throw new HttpError(403, 'You can only view your own results.');
   }
-  const subjects = db.prepare(`
+  const subjects = getDb().prepare(`
     SELECT sub.id, sub.name, sub.code, SUM(g.score) score, SUM(g.max_score) max
     FROM grades g JOIN subjects sub ON sub.id = g.subject_id
     WHERE g.student_id = ? GROUP BY sub.id ORDER BY sub.name`).all(id)
@@ -1172,7 +1179,7 @@ add('GET', '/api/grades/student/:id', ({ user, params }) => {
       pct: round1((s.score * 100) / s.max),
       grade: letterGrade((s.score * 100) / s.max),
     }));
-  const details = db.prepare(`
+  const details = getDb().prepare(`
     SELECT g.id, g.assessment, g.score, g.max_score, g.term, sub.name AS subject
     FROM grades g JOIN subjects sub ON sub.id = g.subject_id
     WHERE g.student_id = ? ORDER BY sub.name, g.id`).all(id);
@@ -1189,7 +1196,7 @@ add('DELETE', '/api/grades/:id', ({ user, params }) => {
   if (user.role !== 'admin' && user.role !== 'teacher') {
     throw new HttpError(403, 'Staff access required.');
   }
-  db.prepare('DELETE FROM grades WHERE id = ?').run(num(params.id));
+  getDb().prepare('DELETE FROM grades WHERE id = ?').run(num(params.id));
   return { ok: true };
 });
 
@@ -1199,7 +1206,7 @@ add('GET', '/api/timetable', ({ user, query }) => {
   let classId = query.class_id ? num(query.class_id) : null;
   let teacherId = query.mine ? user.teacher_id : null;
   if (user.role === 'student' && !classId) classId = user.class_id;
-  const rows = db.prepare(`
+  const rows = getDb().prepare(`
     SELECT t.id, t.day, t.start_time, t.end_time, t.room,
            c.id AS class_id, c.name AS class_name,
            sub.id AS subject_id, sub.name AS subject, u.name AS teacher
@@ -1221,12 +1228,12 @@ add('POST', '/api/timetable', ({ user, body }) => {
   if (!classId || !subjectId || !DAYS.includes(day) || !start || !end) {
     bad('Class, subject, day and times are required.');
   }
-  const sub = db.prepare('SELECT class_id FROM subjects WHERE id = ?').get(subjectId);
+  const sub = getDb().prepare('SELECT class_id FROM subjects WHERE id = ?').get(subjectId);
   if (!sub || sub.class_id !== classId) bad('That subject does not belong to the selected class.');
-  const clash = db.prepare(`
+  const clash = getDb().prepare(`
     SELECT 1 FROM timetable WHERE class_id = ? AND day = ? AND start_time = ?`).get(classId, day, start);
   if (clash) throw new HttpError(409, 'A lesson already occupies that slot.');
-  const id = Number(db.prepare(`
+  const id = Number(getDb().prepare(`
     INSERT INTO timetable (class_id, subject_id, day, start_time, end_time, room)
     VALUES (?, ?, ?, ?, ?, ?)`)
     .run(classId, subjectId, day, start, end, str(body.room, 30)).lastInsertRowid);
@@ -1235,7 +1242,7 @@ add('POST', '/api/timetable', ({ user, body }) => {
 
 add('DELETE', '/api/timetable/:id', ({ user, params }) => {
   if (user.role !== 'admin') throw new HttpError(403, 'Only administrators can edit the timetable.');
-  db.prepare('DELETE FROM timetable WHERE id = ?').run(num(params.id));
+  getDb().prepare('DELETE FROM timetable WHERE id = ?').run(num(params.id));
   return { ok: true };
 });
 
@@ -1254,19 +1261,19 @@ add('POST', '/api/announcements', ({ user, body }) => {
   const text = str(body.body, 4000);
   if (!title || !text) bad('Title and message are required.');
   const audience = ['all', 'students', 'teachers'].includes(body.audience) ? body.audience : 'all';
-  const id = Number(db.prepare(`
+  const id = Number(getDb().prepare(`
     INSERT INTO announcements (title, body, audience, author_id, pinned)
     VALUES (?, ?, ?, ?, ?)`).run(title, text, audience, user.id, bool(body.pinned)).lastInsertRowid);
   return { id };
 });
 
 add('DELETE', '/api/announcements/:id', ({ user, params }) => {
-  const row = db.prepare('SELECT author_id FROM announcements WHERE id = ?').get(num(params.id));
+  const row = getDb().prepare('SELECT author_id FROM announcements WHERE id = ?').get(num(params.id));
   if (!row) throw new HttpError(404, 'Announcement not found.');
   if (user.role !== 'admin' && row.author_id !== user.id) {
     throw new HttpError(403, 'You can only delete your own announcements.');
   }
-  db.prepare('DELETE FROM announcements WHERE id = ?').run(num(params.id));
+  getDb().prepare('DELETE FROM announcements WHERE id = ?').run(num(params.id));
   return { ok: true };
 });
 
@@ -1289,7 +1296,7 @@ add('GET', '/api/fees', ({ user, query }) => {
     const term = `%${str(query.q, 80).toLowerCase()}%`;
     params.push(term, term);
   }
-  const rows = db.prepare(`
+  const rows = getDb().prepare(`
     SELECT f.*, u.name AS student, s.admission_no, s.id AS student_id,
            c.name AS class_name, s.class_id
     FROM fees f JOIN students s ON s.id = f.student_id
@@ -1310,10 +1317,10 @@ add('POST', '/api/fees', ({ user, body }) => {
   const description = str(body.description, 160);
   const amount = num(body.amount);
   if (!studentId || !description || amount <= 0) bad('Student, description and a positive amount are required.');
-  if (!db.prepare('SELECT 1 FROM students WHERE id = ?').get(studentId)) {
+  if (!getDb().prepare('SELECT 1 FROM students WHERE id = ?').get(studentId)) {
     throw new HttpError(404, 'Student not found.');
   }
-  const id = Number(db.prepare(`
+  const id = Number(getDb().prepare(`
     INSERT INTO fees (student_id, term, description, amount, paid, due_date)
     VALUES (?, ?, ?, ?, 0, ?)`)
     .run(studentId, str(body.term, 60) || TERM, description, amount, str(body.due_date, 20)).lastInsertRowid);
@@ -1322,18 +1329,18 @@ add('POST', '/api/fees', ({ user, body }) => {
 
 add('POST', '/api/fees/:id/payments', ({ user, params, body }) => {
   if (user.role !== 'admin') throw new HttpError(403, 'Only administrators can record payments.');
-  const fee = db.prepare('SELECT * FROM fees WHERE id = ?').get(num(params.id));
+  const fee = getDb().prepare('SELECT * FROM fees WHERE id = ?').get(num(params.id));
   if (!fee) throw new HttpError(404, 'Invoice not found.');
   const amount = num(body.amount);
   if (amount <= 0) bad('Enter a payment amount greater than zero.');
   if (amount > fee.amount - fee.paid + 0.001) bad('Payment exceeds the outstanding balance.');
-  db.prepare('UPDATE fees SET paid = paid + ? WHERE id = ?').run(amount, fee.id);
+  getDb().prepare('UPDATE fees SET paid = paid + ? WHERE id = ?').run(amount, fee.id);
   return { ok: true, paid: fee.paid + amount, balance: fee.amount - fee.paid - amount };
 });
 
 add('DELETE', '/api/fees/:id', ({ user, params }) => {
   if (user.role !== 'admin') throw new HttpError(403, 'Only administrators can delete invoices.');
-  db.prepare('DELETE FROM fees WHERE id = ?').run(num(params.id));
+  getDb().prepare('DELETE FROM fees WHERE id = ?').run(num(params.id));
   return { ok: true };
 });
 
@@ -1341,7 +1348,7 @@ add('DELETE', '/api/fees/:id', ({ user, params }) => {
 
 add('GET', '/api/reports/classes', ({ user }) => {
   assertStaff(user);
-  return db.prepare('SELECT id FROM classes ORDER BY name').all()
+  return getDb().prepare('SELECT id FROM classes ORDER BY name').all()
     .map((c) => classStats(c.id));
 });
 
@@ -1350,7 +1357,7 @@ add('GET', '/api/reports/class/:id', ({ user, params }) => {
   const id = num(params.id);
   const cls = classStats(id);
   if (!cls) throw new HttpError(404, 'Class not found.');
-  const subjects = db.prepare(`
+  const subjects = getDb().prepare(`
     SELECT sub.id, sub.name, sub.code, u.name AS teacher,
            AVG(g.score * 100.0 / g.max_score) pct, COUNT(g.id) entries
     FROM subjects sub LEFT JOIN teachers t ON t.id = sub.teacher_id
@@ -1358,14 +1365,14 @@ add('GET', '/api/reports/class/:id', ({ user, params }) => {
     LEFT JOIN grades g ON g.subject_id = sub.id
     WHERE sub.class_id = ? GROUP BY sub.id ORDER BY sub.name`).all(id)
     .map((s) => ({ ...s, pct: round1(s.pct) }));
-  const top = db.prepare(`
+  const top = getDb().prepare(`
     SELECT s.id, u.name, SUM(g.score) * 100.0 / SUM(g.max_score) pct
     FROM students s JOIN users u ON u.id = s.user_id
     JOIN grades g ON g.student_id = s.id
     WHERE s.class_id = ? GROUP BY s.id ORDER BY pct DESC LIMIT 5`).all(id)
     .map((s) => ({ ...s, pct: round1(s.pct), grade: letterGrade(s.pct) }));
   const distribution = { 'A': 0, 'B': 0, 'C': 0, 'D': 0, 'E': 0, 'F': 0 };
-  db.prepare(`
+  getDb().prepare(`
     SELECT g.score * 100.0 / g.max_score pct FROM grades g
     JOIN students s ON s.id = g.student_id WHERE s.class_id = ?`).all(id)
     .forEach((r) => {
@@ -1380,15 +1387,15 @@ add('GET', '/api/reports/class/:id', ({ user, params }) => {
 
 add('GET', '/api/reports/finance', ({ user }) => {
   assertStaff(user);
-  const totals = db.prepare(`
+  const totals = getDb().prepare(`
     SELECT SUM(amount) billed, SUM(paid) paid, SUM(amount - paid) balance FROM fees`).get();
-  const byClass = db.prepare(`
+  const byClass = getDb().prepare(`
     SELECT c.id, c.name, SUM(f.amount) billed, SUM(f.paid) paid,
            SUM(f.amount - f.paid) balance, COUNT(DISTINCT f.student_id) students
     FROM fees f JOIN students s ON s.id = f.student_id
     LEFT JOIN classes c ON c.id = s.class_id
     GROUP BY c.id ORDER BY c.name`).all();
-  const statuses = db.prepare(`
+  const statuses = getDb().prepare(`
     SELECT SUM(CASE WHEN paid >= amount THEN 1 ELSE 0 END) paid,
            SUM(CASE WHEN paid > 0 AND paid < amount THEN 1 ELSE 0 END) partial,
            SUM(CASE WHEN paid = 0 THEN 1 ELSE 0 END) unpaid,
@@ -1462,6 +1469,9 @@ async function handle(req, res) {
       ? await readBody(req) : {};
     const query = Object.fromEntries(url.searchParams.entries());
     const data = await match.route.handler({ req, res, user, body, query, params });
+    if (req.method !== 'GET') {
+      try { await syncDb(); } catch (err) { console.error('[api] blob sync failed', err.message); }
+    }
     json(res, 200, data);
   } catch (err) {
     if (err instanceof HttpError) {

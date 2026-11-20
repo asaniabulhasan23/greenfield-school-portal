@@ -2,22 +2,68 @@
 
 const path = require('node:path');
 const fs = require('node:fs');
+const os = require('node:os');
 const crypto = require('node:crypto');
 const { DatabaseSync } = require('node:sqlite');
 
-const DATA_DIR = path.join(__dirname, '..', 'data');
+/* On Vercel the filesystem is ephemeral, so the database and user files live
+   in a temp folder and are mirrored to a private Vercel Blob store. */
+const BLOB_ENABLED = Boolean(process.env.BLOB_READ_WRITE_TOKEN);
+const VERCEL = Boolean(process.env.VERCEL);
+const DATA_DIR = BLOB_ENABLED || VERCEL
+  ? path.join(os.tmpdir(), 'greenfield-school-portal')
+  : path.join(__dirname, '..', 'data');
+const UPLOADS_DIR = path.join(DATA_DIR, 'uploads');
+const EXPORTS_DIR = path.join(DATA_DIR, 'exports');
+const DB_PATH = path.join(DATA_DIR, 'school.db');
+const BLOB_DB = 'greenfield-school-portal/school.db';
+const BLOB_UPLOADS = 'greenfield-school-portal/uploads/';
+const BLOB_EXPORTS = 'greenfield-school-portal/exports/';
+
 fs.mkdirSync(DATA_DIR, { recursive: true });
+fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+fs.mkdirSync(EXPORTS_DIR, { recursive: true });
 
-const db = new DatabaseSync(path.join(DATA_DIR, 'school.db'));
+let db = null;
+let initPromise = null;
 
-db.exec('PRAGMA journal_mode = WAL');
-db.exec('PRAGMA foreign_keys = ON');
+async function blobModule() {
+  return import('@vercel/blob');
+}
+
+async function blobRead(pathname) {
+  if (!BLOB_ENABLED) return null;
+  const { get } = await blobModule();
+  let result;
+  try {
+    result = await get(pathname, { access: 'private' });
+  } catch (err) {
+    console.error('[blob] read failed', pathname, err.message);
+    return null;
+  }
+  if (!result || result.statusCode !== 200) return null;
+  const chunks = [];
+  for await (const chunk of result.stream) chunks.push(Buffer.from(chunk));
+  return Buffer.concat(chunks);
+}
+
+async function blobWrite(pathname, bytes, contentType = 'application/octet-stream') {
+  if (!BLOB_ENABLED) return;
+  const { put } = await blobModule();
+  await put(pathname, bytes, { access: 'private', contentType });
+}
+
+async function blobDelete(pathname) {
+  if (!BLOB_ENABLED) return;
+  const { del } = await blobModule();
+  await del(pathname, { access: 'private' });
+}
 
 /* ------------------------------------------------------------------ */
 /*  Schema                                                             */
 /* ------------------------------------------------------------------ */
 
-db.exec(`
+const SCHEMA = `
 CREATE TABLE IF NOT EXISTS users (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
   name          TEXT    NOT NULL,
@@ -146,11 +192,7 @@ CREATE INDEX IF NOT EXISTS idx_attendance_date ON attendance (date);
 CREATE INDEX IF NOT EXISTS idx_attendance_class ON attendance (class_id, date);
 CREATE INDEX IF NOT EXISTS idx_fees_student ON fees (student_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions (user_id);
-`);
-
-/* ------------------------------------------------------------------ */
-/*  Lightweight migrations (keeps an existing demo database working)   */
-/* ------------------------------------------------------------------ */
+`;
 
 function ensureColumn(table, column, decl) {
   const cols = db.prepare(`PRAGMA table_info(${table})`).all();
@@ -159,11 +201,70 @@ function ensureColumn(table, column, decl) {
   }
 }
 
-ensureColumn('users', 'photo', 'TEXT');
-ensureColumn('classes', 'section_id', 'INTEGER');
+function openDatabase() {
+  db = new DatabaseSync(DB_PATH);
+  db.exec('PRAGMA foreign_keys = ON');
+  if (!BLOB_ENABLED) db.exec('PRAGMA journal_mode = WAL');
+  db.exec(SCHEMA);
+  ensureColumn('users', 'photo', 'TEXT');
+  ensureColumn('classes', 'section_id', 'INTEGER');
+}
 
-const UPLOADS_DIR = path.join(DATA_DIR, 'uploads');
-fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+async function initDb() {
+  if (db) return db;
+  if (!initPromise) {
+    initPromise = (async () => {
+      if (BLOB_ENABLED) {
+        const bytes = await blobRead(BLOB_DB);
+        if (bytes) fs.writeFileSync(DB_PATH, bytes);
+      }
+      openDatabase();
+      return db;
+    })();
+  }
+  return initPromise;
+}
+
+function getDb() {
+  if (!db) throw new Error('Database is not initialised yet.');
+  return db;
+}
+
+async function syncDb() {
+  if (!BLOB_ENABLED || !db) return;
+  await blobWrite(BLOB_DB, fs.readFileSync(DB_PATH));
+}
+
+/* ------------------------------------------------------------------ */
+/*  File helpers (mirrored to Blob on Vercel)                          */
+/* ------------------------------------------------------------------ */
+
+async function saveUpload(name, buffer) {
+  fs.writeFileSync(path.join(UPLOADS_DIR, name), buffer);
+  await blobWrite(BLOB_UPLOADS + name, buffer);
+}
+
+async function readUpload(name) {
+  const local = path.join(UPLOADS_DIR, name);
+  if (fs.existsSync(local)) return fs.readFileSync(local);
+  return blobRead(BLOB_UPLOADS + name);
+}
+
+async function deleteUpload(name) {
+  try { fs.unlinkSync(path.join(UPLOADS_DIR, name)); } catch { /* already gone */ }
+  await blobDelete(BLOB_UPLOADS + name);
+}
+
+async function saveExport(name, buffer) {
+  fs.writeFileSync(path.join(EXPORTS_DIR, name), buffer);
+  await blobWrite(BLOB_EXPORTS + name, buffer, 'application/pdf');
+}
+
+async function readExport(name) {
+  const local = path.join(EXPORTS_DIR, name);
+  if (fs.existsSync(local)) return fs.readFileSync(local);
+  return blobRead(BLOB_EXPORTS + name);
+}
 
 /* ------------------------------------------------------------------ */
 /*  Password helpers                                                   */
@@ -222,21 +323,15 @@ function todayISO() {
 }
 
 function isSeeded() {
-  const row = db.prepare('SELECT COUNT(*) AS n FROM users').get();
+  const row = getDb().prepare('SELECT COUNT(*) AS n FROM users').get();
   return row.n > 0;
 }
 
 module.exports = {
-  db,
-  hashPassword,
-  verifyPassword,
-  isSeeded,
-  TERM,
-  SCHOOL,
-  DAYS,
-  PERIODS,
-  letterGrade,
-  todayISO,
-  DATA_DIR,
-  UPLOADS_DIR,
+  initDb, getDb, syncDb,
+  saveUpload, readUpload, deleteUpload,
+  saveExport, readExport,
+  hashPassword, verifyPassword, isSeeded,
+  TERM, SCHOOL, DAYS, PERIODS, letterGrade, todayISO,
+  DATA_DIR, UPLOADS_DIR, EXPORTS_DIR, BLOB_ENABLED,
 };
