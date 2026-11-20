@@ -2,18 +2,18 @@ import { get, post } from './api.js';
 import { state, loadMeta, navigate } from './store.js';
 import { setPageMeta, icon, esc, roleLabel, avatar, toast } from './ui.js';
 
-import * as dashboard from './views/dashboard.js?v=11';
-import * as students from './views/students.js?v=11';
-import * as teachers from './views/teachers.js?v=11';
-import * as classesView from './views/classes.js?v=11';
-import * as sections from './views/sections.js?v=11';
-import * as attendance from './views/attendance.js?v=11';
-import * as grades from './views/grades.js?v=11';
-import * as timetable from './views/timetable.js?v=11';
-import * as announcements from './views/announcements.js?v=11';
-import * as fees from './views/fees.js?v=11';
-import * as reports from './views/reports.js?v=11';
-import * as settings from './views/settings.js?v=11';
+import * as dashboard from './views/dashboard.js?v=12';
+import * as students from './views/students.js?v=12';
+import * as teachers from './views/teachers.js?v=12';
+import * as classesView from './views/classes.js?v=12';
+import * as sections from './views/sections.js?v=12';
+import * as attendance from './views/attendance.js?v=12';
+import * as grades from './views/grades.js?v=12';
+import * as timetable from './views/timetable.js?v=12';
+import * as announcements from './views/announcements.js?v=12';
+import * as fees from './views/fees.js?v=12';
+import * as reports from './views/reports.js?v=12';
+import * as settings from './views/settings.js?v=12';
 
 /* ── Route table ────────────────────────────────────────── */
 

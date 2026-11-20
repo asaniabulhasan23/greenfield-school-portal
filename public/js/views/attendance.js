@@ -4,8 +4,8 @@ import {
   esc, icon, avatar, pct, dateShort, pageHead, setPageMeta, emptyState, toast,
   attendanceBadge, areaChart,
 } from '../ui.js';
-import { downloadPdf } from '../pdf.js?v=11';
-import { buildAttendanceRegister } from '../documents.js?v=11';
+import { downloadPdf } from '../pdf.js?v=12';
+import { buildAttendanceRegister } from '../documents.js?v=12';
 
 const STATUSES = [
   ['present', 'Present'],

@@ -4,8 +4,8 @@ import {
   esc, icon, avatar, money, pct, pageHead, setPageMeta, emptyState, openModal,
   confirmDialog, formFields, toast,
 } from '../ui.js';
-import { downloadPdf } from '../pdf.js?v=11';
-import { buildSectionReport } from '../documents.js?v=11';
+import { downloadPdf } from '../pdf.js?v=12';
+import { buildSectionReport } from '../documents.js?v=12';
 
 function hashQuery() {
   return new URLSearchParams(location.hash.split('?')[1] || '');

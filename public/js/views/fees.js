@@ -4,8 +4,8 @@ import {
   esc, icon, money, compactMoney, pct, dateShort, feeBadge, pageHead, setPageMeta,
   emptyState, openModal, confirmDialog, formFields, toast,
 } from '../ui.js';
-import { downloadPdf } from '../pdf.js?v=11';
-import { buildFeeStatement } from '../documents.js?v=11';
+import { downloadPdf } from '../pdf.js?v=12';
+import { buildFeeStatement } from '../documents.js?v=12';
 
 const filters = { class_id: '', q: '', status: '' };
 

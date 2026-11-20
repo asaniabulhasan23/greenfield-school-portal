@@ -4,8 +4,8 @@ import {
   esc, icon, avatar, money, pct, dateShort, gradeBadge, attendanceBadge, feeBadge,
   pageHead, setPageMeta, emptyState, openModal, confirmDialog, formFields, toast, metricBars,
 } from '../ui.js';
-import { downloadPdf } from '../pdf.js?v=11';
-import { buildReportCard, buildStudentList } from '../documents.js?v=11';
+import { downloadPdf } from '../pdf.js?v=12';
+import { buildReportCard, buildStudentList } from '../documents.js?v=12';
 
 const filters = { q: '', class_id: '' };
 

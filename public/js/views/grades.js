@@ -4,8 +4,8 @@ import {
   esc, icon, avatar, pct, gradeBadge, pageHead, setPageMeta, emptyState, toast,
   areaChart, donut, metricBars,
 } from '../ui.js';
-import { downloadPdf } from '../pdf.js?v=11';
-import { buildGradeSheet, buildClassResults, buildStudentResults } from '../documents.js?v=11';
+import { downloadPdf } from '../pdf.js?v=12';
+import { buildGradeSheet, buildClassResults, buildStudentResults } from '../documents.js?v=12';
 
 const pick = { class_id: '', subject_id: '', term: '' };
 

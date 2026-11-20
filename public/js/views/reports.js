@@ -4,8 +4,8 @@ import {
   esc, icon, money, compactMoney, pct, gradeBadge, pageHead, setPageMeta, emptyState,
   areaChart, donut, metricBars, toast,
 } from '../ui.js';
-import { downloadPdf } from '../pdf.js?v=11';
-import { buildClassOverview, buildClassResults, buildFinanceReport } from '../documents.js?v=11';
+import { downloadPdf } from '../pdf.js?v=12';
+import { buildClassOverview, buildClassResults, buildFinanceReport } from '../documents.js?v=12';
 
 let tab = 'classes';
 let activeClass = null;

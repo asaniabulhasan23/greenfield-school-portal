@@ -3,8 +3,8 @@ import { state, classes, subjects, refresh, isAdmin } from '../store.js';
 import {
   esc, icon, pageHead, setPageMeta, emptyState, openModal, confirmDialog, formFields, toast,
 } from '../ui.js';
-import { downloadPdf } from '../pdf.js?v=11';
-import { buildTimetable } from '../documents.js?v=11';
+import { downloadPdf } from '../pdf.js?v=12';
+import { buildTimetable } from '../documents.js?v=12';
 
 const DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'];
 const DEFAULT_TIMES = [['08:00', '08:45'], ['08:50', '09:35'], ['09:40', '10:25'], ['11:00', '11:45'], ['11:50', '12:35']];
