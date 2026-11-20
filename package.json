@@ -1,0 +1,15 @@
+{
+  "name": "school-portal",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Greenfield Academy — full-stack school management portal (Node + SQLite, zero dependencies)",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js",
+    "seed": "node server/seed.js"
+  },
+  "engines": {
+    "node": ">=22.5"
+  }
+}
