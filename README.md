@@ -42,6 +42,33 @@ Use a different port with `PORT=8080 node server/index.js`.
 
 ---
 
+## Hosted on Vercel
+
+- **Live app:** https://greenfield-school-portal-asaniabulhasan23.vercel.app
+- **GitHub:** https://github.com/asaniabulhasan23/greenfield-school-portal
+
+`api/index.js` is the serverless entry point; it reuses the same HTTP handler as the local
+server. `vercel.json` routes every request to it and includes `public/**` in the function
+bundle. On Vercel the SQLite file, profile photos and exported PDFs live in a private
+Vercel Blob store (`BLOB_READ_WRITE_TOKEN`); the local filesystem under `os.tmpdir()` is
+only a per-instance cache. The database is synced to Blob after every write, so data
+survives cold starts. Demo data is seeded automatically on the first request.
+
+To deploy your own copy:
+
+```bash
+# push to GitHub, then:
+npm i -g vercel
+vercel          # link the project
+vercel env add BLOB_READ_WRITE_TOKEN
+vercel --prod
+```
+
+The Vercel project is public (SSO protection disabled) so anyone can open the demo.
+Change the demo passwords before using it with real data.
+
+---
+
 ## Demo accounts
 
 | Role    | Email                                          | Password     |
